@@ -1,0 +1,364 @@
+#!/usr/bin/env python
+# coding=utf-8
+#
+# Copyright 2014 Jens Lindström, Opera Software ASA
+#
+# The UpdateTrackedBranch extensions to the Critic code review system is
+# licensed under the Apache License, version 2.0.  You may obtain a copy of the
+# License at
+#
+#  http://www.apache.org/licenses/LICENSE-2.0
+#
+
+"""
+Git hook that notifies a Critic system about updated refs
+
+Description
+-----------
+
+This script is useful when a Critic system tracks branches from other (remote)
+Git repositories.  When it does that, it polls the other repository for updates
+on a timer, but rather infrequently.  For a more immediate tracking, this script
+tells the Critic system about updated refs in the other repository, so that the
+Critic system can schedule an immediate update of its tracking branch.
+
+This script uses the 'Requests' Python package to make HTTP requests.  On a
+Debian/Ubuntu system, this can be installed by running the command
+
+  # apt-get install python-requests
+
+or it can be installed using pip by running the command
+
+  # pip install requests
+
+Installation
+------------
+
+Create a symlink in the Git repository's hooks/ directory to this script, named
+either "post-receive" or "post-update".  The former is recommended but the
+latter can be used if there is already another post-receive hook installed in
+the repository.
+
+See githooks(5) for more information on Git hooks.
+
+Configuration
+-------------
+
+This script reads its configuration using "git config", so its settings can be
+configured on a system-wide level (using "git config --system"), per user (using
+"git config --global") or per repository (using plain "git config" in the
+repository.)
+
+Required settings:
+
+  critic.url
+    The base URL ("http://<hostname>/") of the Critic system that should be
+    notified about updates.
+
+  critic.updateHookEnabled
+    (Boolean)  Set to true to enable the hook.
+
+Optional settings:
+
+  critic.repository
+    The repository URL of *this* repository that would be used as the remote
+    repository URL in Critic's UI.  This value is used by the Critic server-side
+    code to identify the branch being updated and map it to a tracking branch to
+    update.
+
+    This setting really only makes sense to set in the repository.
+
+  critic.repositoryPrefix
+    Can be used instead of critic.repository.  This value should be a URL prefix
+    such as "<hostname>:" or "ssh://<hostname>/" to which the repository's
+    actual file system path is added to construct a repository URL.
+
+    This setting can be set system-wide.  If neither this nor critic.repository
+    is set, this setting defaults to "<hostname>:", where the <hostname> part is
+    the output from the command "hostname --fqdn".
+
+  critic.contact
+    An email address to which messages are sent when this script fails in some
+    way to tell Critic about an updated ref.
+
+  critic.disableCertificateVerification
+    (Boolean)  If set to true, certificate validation is disabled when accessing
+    the Critic system.  This is only relevant if the Critic system is accessed
+    over HTTPS.
+
+  critic.sendUsernames
+    (Boolean)  If set to true, the (local) user name of the user pushing is sent
+    to Critic as part of the notification.  This is only meaningful if the local
+    user names are identical to the Critic user names, such as when both systems
+    use a shared user database (for instance a NIS or LDAP database.)
+
+  critic.username
+  critic.password
+    If both are set, they are supplied as HTTP authorization credentials when
+    accessing the Critic system.  Since they have to be stored in plain text, it
+    is typically recommended to instead allow anonymous access to the Critic
+    system, at least for the URL accessed by this script.
+
+    In theory, each user pushing to the repository could set these in their per
+    user Git settings, thus accessing the Critic system as their own Critic
+    user.  However, they would still be stored in plain text, so this is not a
+    recommended solution either.
+
+  critic.debugUpdateHook
+    (Boolean)  If set to true, some debugging output is sent back to the Git
+    client that is performing the push.
+
+    An individual user can set this setting to true in their per user Git
+    settings to have debugging output when they push.
+
+Note: All these settings need to be configured in the "other" repository or, in
+the case of system-wide or per user settings, on the machine hosting the "other"
+repository.  They should not be set in Critic's repositories, or on the
+machine(s) from which users push to the "other" repository.
+"""
+
+import json
+import os
+import pwd
+import sys
+import subprocess
+import time
+import traceback
+
+import requests
+
+def git_config(args, default=None):
+    try:
+        return subprocess.check_output(["git", "config"] + args).strip()
+    except subprocess.CalledProcessError as error:
+        if error.returncode == 1:
+            return default
+        raise
+
+def git_config_bool(name, default=False):
+    default = "true" if default else "false"
+    return git_config(["--bool", name], default) == "true"
+
+debug = git_config_bool("critic.debugupdatehook")
+local_username = pwd.getpwuid(os.getuid()).pw_name
+
+log = ["User: " + local_username,
+       "Path: " + os.getcwd(),
+       "Args: " + " ".join(sys.argv[1:]),
+       ""]
+
+def print_and_log(line, do_print=True):
+    log.append(line)
+    if do_print:
+        sys.stdout.write(line + "\n")
+
+def print_debug(message):
+    for line in message.splitlines():
+        print_and_log("[critic:debug] %s" % line.encode("utf-8"), debug)
+    sys.stdout.flush()
+
+def print_progress(message):
+    for line in message.splitlines():
+        print_and_log("[critic] %s" % line.encode("utf-8"))
+    sys.stdout.flush()
+
+def print_hook(message):
+    print_and_log("[critic] %s" % ("-" * 60))
+    for line in message.splitlines():
+        print_and_log("[critic] %s" % line.encode("utf-8"))
+    print_and_log("[critic] %s" % ("-" * 60))
+    sys.stdout.flush()
+
+def print_error(message):
+    for line in message.splitlines():
+        print_and_log("[critic:error] %s" % line.encode("utf-8"))
+    sys.stdout.flush()
+
+if not git_config_bool("critic.updatehookenabled"):
+    print_debug("Update hook not enabled.")
+    sys.exit(0)
+
+hostname = subprocess.check_output(["hostname", "--fqdn"]).strip()
+
+critic_url = git_config(["critic.url"])
+if not critic_url:
+    print_error("No Critic URL set!")
+    sys.exit(1)
+
+if not critic_url.endswith("/"):
+    critic_url += "/"
+
+critic_url += "UpdateTrackedBranch/githook"
+
+critic_contact = git_config(["critic.contact"])
+
+repository_url = git_config(["critic.repository"])
+if not repository_url:
+    repository_path = os.getcwd()
+
+    owner_uid = os.stat(os.path.join(repository_path, "..")).st_uid
+    owner_pwd = pwd.getpwuid(owner_uid)
+    owner_dir = owner_pwd.pw_dir
+    if not owner_dir.endswith("/"):
+        owner_dir += "/"
+    if repository_path.startswith(owner_dir):
+        repository_path = os.path.join(
+            "~" + owner_pwd.pw_name,
+            os.path.relpath(repository_path, owner_dir))
+
+    repository_prefix = git_config(["critic.repositoryprefix"])
+    if not repository_prefix:
+        repository_prefix = hostname + ":"
+        print_debug("Using automatic repository prefix: %r" % repository_prefix)
+
+    scheme, colon, rest = repository_prefix.partition(":")
+    if rest:
+        if scheme not in ("git", "ssh", "http", "https"):
+            print_debug("Unexpected scheme in repository prefix: %r" % scheme)
+        if not repository_prefix.endswith("/"):
+            repository_prefix += "/"
+    elif not colon:
+        repository_prefix += ":"
+
+    if repository_prefix.endswith("/"):
+        repository_path = repository_path.lstrip("/")
+
+    repository_url = repository_prefix + repository_path
+
+    print_debug("Using automatic repository URL: %r" % repository_url)
+
+send_usernames = git_config_bool("critic.sendusernames")
+connection_timeout = int(git_config(["--int", "critic.connectiontimeout"], 5))
+update_timeout = int(git_config(["--int", "critic.updatetimeout"], 30))
+
+kwargs = {}
+
+critic_username = git_config(["critic.username"])
+critic_password = git_config(["critic.password"])
+if critic_username and critic_password:
+    kwargs["auth"] = (critic_username, critic_password)
+
+if git_config_bool("critic.disablecertificateverification"):
+    kwargs["verify"] = False
+
+try:
+    # List of (ref, value) tuples.
+    refs = []
+
+    if os.path.basename(sys.argv[0]) == "post-update":
+        for ref in sys.argv[1:]:
+            try:
+                value = subprocess.check_output(["git", "rev-parse", ref]).strip()
+            except subprocess.CalledProcessError as error:
+                value = "0" * 40
+            refs.append((ref, value))
+    elif os.path.basename(sys.argv[0]) == "post-receive":
+        for line in sys.stdin:
+            _, value, ref = line.rstrip().split(" ", 2)
+            refs.append((ref, value))
+    else:
+        print_error("Hook installed incorrectly; not called as post-receive or post-update.")
+        raise Exception
+
+    for ref, value in refs:
+        start = time.time()
+        deadline = start + connection_timeout
+
+        def issue_request(trigger=False):
+            data = { "remote": repository_url,
+                     "name": ref,
+                     "value": value }
+            if trigger:
+                data["trigger"] = True
+            if send_usernames:
+                data["username"] = local_username
+            response = requests.post(
+                critic_url,
+                data=json.dumps(data),
+                timeout=(deadline - time.time()) + 0.5,
+                **kwargs)
+            response.raise_for_status()
+            data = json.loads(response.content)
+            if data["status"] != "ok":
+                raise Exception("Request failed: " + data["error"])
+            return data
+
+        try:
+            data = issue_request(trigger=True)
+        except requests.exceptions.Timeout:
+            print_error("Timeout (%ds) while notifying Critic!"
+                        % connection_timeout)
+            raise
+
+        if "review" in data:
+            print_progress("Review: %s" % data["review"])
+        elif "branch" in data:
+            print_progress("Tracked branch: %s" % data["branch"])
+        else:
+            print_debug("Nothing to update!")
+            continue
+
+        if "disabled" in data:
+            print_progress("Tracking is disabled!")
+        elif "update_ongoing" in data:
+            print_progress("Update already in progress.")
+        elif "update_pending" in data:
+            print_progress("Update already scheduled.")
+        elif "update_triggered" in data:
+            if "review" not in data:
+                print_progress("Update scheduled.")
+                continue
+
+            print_progress("Update triggered; waiting for it to complete...")
+
+            deadline = start + update_timeout
+            time.sleep(0.5)
+
+            while time.time() < deadline:
+                try:
+                    data = issue_request()
+                except requests.exceptions.Timeout:
+                    # The loop condition will be false now, so this effectively
+                    # breaks out of the loop.  We don't use 'break' since we
+                    # want the loop's else branch to execute.
+                    continue
+
+                if "hook_output" in data:
+                    if not data["update_successful"]:
+                        print_error("Critic rejected the update!")
+                    print_hook(data["hook_output"])
+                    break
+                elif not ("update_ongoing" in data or
+                          "update_pending" in data):
+                    print_progress("Update completed without output.")
+                    break
+
+                remaining = deadline - time.time()
+
+                if remaining > 0:
+                    time.sleep(min(0.5, remaining))
+            else:
+                print_progress("Timeout while waiting for update to complete.")
+except Exception:
+    print_debug("Exception:")
+    print_debug(traceback.format_exc())
+
+    if critic_contact:
+        try:
+            summary = "Update of %s in %s" % (ref, os.getcwd())
+            body = "\n".join(log)
+
+            sendmail = subprocess.Popen(
+                ["mail", "-s", summary, critic_contact],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE)
+
+            stdout, stderr = sendmail.communicate(body)
+
+            if sendmail.returncode != 0:
+                print_debug("Failed to send mail:")
+                print_debug(stderr)
+        except Exception:
+            print_debug("Exception when sending mail:")
+            print_debug(traceback.format_exc())

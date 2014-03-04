@@ -1,0 +1,9 @@
+Author = "Jens Lindstrom <jl@opera.com>"
+Description = "Schedule immediate update of tracked branch when updated in remote."
+Hidden = Yes
+Flavor = js/v8
+
+[Page UpdateTrackedBranch/githook]
+Description = "Operation called by post-update/post-receive hook."
+Script = githook.js
+Function = main
