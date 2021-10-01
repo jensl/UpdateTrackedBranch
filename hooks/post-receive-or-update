@@ -129,7 +129,7 @@ import requests
 
 def git_config(args, default=None):
     try:
-        return subprocess.check_output(["git", "config"] + args).strip()
+        return subprocess.check_output(["git", "config"] + args, text=True).strip()
     except subprocess.CalledProcessError as error:
         if error.returncode == 1:
             return default
@@ -178,7 +178,7 @@ if not git_config_bool("critic.updatehookenabled"):
     print_debug("Update hook not enabled.")
     sys.exit(0)
 
-hostname = subprocess.check_output(["hostname", "--fqdn"]).strip()
+hostname = subprocess.check_output(["hostname", "--fqdn"], text=True).strip()
 
 critic_url = git_config(["critic.url"])
 if not critic_url:
@@ -248,7 +248,7 @@ try:
     if os.path.basename(sys.argv[0]) == "post-update":
         for ref in sys.argv[1:]:
             try:
-                value = subprocess.check_output(["git", "rev-parse", ref]).strip()
+                value = subprocess.check_output(["git", "rev-parse", ref], text=True).strip()
             except subprocess.CalledProcessError as error:
                 value = "0" * 40
             refs.append((ref, value))
