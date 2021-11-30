@@ -53,9 +53,11 @@ function main(method, path, query) {
 
   try {
     var remote = data.remote;
-    remote_transforms.forEach(function (transform) {
-      remote = remote.replace(transform.regexp, transform.replacement);
-    });
+    if (!data.disable_remote_transform) {
+      remote_transforms.forEach(function (transform) {
+        remote = remote.replace(transform.regexp, transform.replacement);
+      });
+    }
 
     var name = data.name;
     name_transforms.forEach(function (transform) {
