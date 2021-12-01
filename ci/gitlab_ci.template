@@ -1,0 +1,8 @@
+critic:
+  stage: build
+  image: "python:3.10"
+  script:
+    - wget https://raw.githubusercontent.com/jensl/UpdateTrackedBranch/master/ci/updateTrackedBranch.py
+    - pip install requests
+    - chmod +x updateTrackedBranch.py
+    - ./updateTrackedBranch.py --critic_url https://critic.* --repository_url git@gitlab.com:user/repo.git --ref $CI_COMMIT_REF_NAME --sha $CI_COMMIT_SHA --username $CRITIC_USERNAME --password $CRITIC_PASSWORD
