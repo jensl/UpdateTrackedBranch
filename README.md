@@ -41,3 +41,6 @@ install the extension "universally" for it to be available anonymously.
 
 [critic]: https://github.com/jensl/critic "Critic on GitHub"
 [tutorial]: https://critic-review.org/tutorial?item=extensions "Extensions tutorial"
+
+The extension can also be triggered from command line with a script, `ci/updateTrackedBranch.py`.
+It can then be integrated into CI, for gitlab the following can be used as inspiration `ci/gitlab_ci.template`.
